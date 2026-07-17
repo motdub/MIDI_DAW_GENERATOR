@@ -4,7 +4,7 @@ A desktop GUI application that procedurally generates genre-agnostic MIDI files 
 
 ## 1. Dependencies
 
-Install the following Python packages for this program to work:
+Please install Python before trying to install dependencies. Install the following Python packages for this program to work:
 
 ```bash
 pip install PyQt6 mido pretty_midi
@@ -39,4 +39,4 @@ All rights reserved. You may not sell this code without permission from the auth
 
 ---
 
-© 2026 Matt Dubois. All rights reserved.
+© 2026 motdub All rights reserved.
