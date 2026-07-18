@@ -358,11 +358,17 @@ def generate_midi_file(config: GenerationConfig,
                        note_data: List[Tuple[int, float, int]],
                        output_path: str):
     """
-    Generate a MIDI file from note data with proper batch note_on/note_off handling.
+    Generate a MIDI file from note data.
     
-    This version correctly handles simultaneous notes (chords) by grouping
-    note_on messages at time=0, then scheduling the note_off messages at the
-    appropriate tick delay.
+    Writes each note as a sequential note_on / note_off pair.
+    The note_off delta advances the track clock, so the next
+    note starts after the previous one finishes. This naturally
+    fills all requested bars, matching the old version's behavior.
+    
+    For chord tracks: notes from the same chord play as a fast
+    arpeggio (sequential), not as a simultaneous block. This is
+    a known trade-off that produces correctly-timed, full-length
+    MIDI files suitable for LMMS import.
     
     Args:
         config: Generation configuration (bpm, etc.)
@@ -377,7 +383,6 @@ def generate_midi_file(config: GenerationConfig,
     midi.tracks.append(track)
 
     # Set tempo meta event: tempo is microseconds per beat
-    # 120 BPM = 500,000 microseconds per beat
     tempo_us_per_beat = int(60_000_000 / config.bpm)
     track.append(MetaMessage('set_tempo', tempo=tempo_us_per_beat))
 
@@ -385,46 +390,15 @@ def generate_midi_file(config: GenerationConfig,
     ticks_per_beat = 480
     seconds_per_tick = 60.0 / (config.bpm * ticks_per_beat)
 
-    # Sort notes by pitch for consistent ordering within chords
-    sorted_notes = sorted(note_data, key=lambda x: (x[0], x[1]))
-    
-    # Process notes in groups: simultaneous notes get time=0 between them,
-    # then the last note_off advances the tick position
-    current_tick = 0
-    # Track note-off events: {tick_offset: [(pitch, velocity), ...]}
-    note_off_events: dict = {}
-    
-    for i, (pitch, duration_sec, velocity) in enumerate(sorted_notes):
+    # Write each note as a sequential note_on / note_off pair.
+    # Each note_off's delta time advances the track clock to the
+    # next note's start position, producing correct multi-bar output.
+    for pitch, duration_sec, velocity in note_data:
         duration_ticks = int(duration_sec / seconds_per_tick) if seconds_per_tick > 0 else 1
-        
-        # Determine if this note overlaps with the next one (chord)
-        has_overlap = False
-        if i + 1 < len(sorted_notes):
-            next_pitch, next_dur, _ = sorted_notes[i + 1]
-            next_dur_ticks = int(next_dur / seconds_per_tick) if seconds_per_tick > 0 else 1
-            # If next note starts at same time (0 ticks after current note_on), it's a chord note
-            if next_dur_ticks == duration_ticks or abs(duration_ticks - next_dur_ticks) < 10:
-                has_overlap = True
-        
-        # Note on - use time=0 for simultaneous notes in a chord
-        track.append(Message('note_on', note=pitch, velocity=velocity, time=0 if i > 0 and has_overlap else 0))
-        
-        # Schedule note off
-        off_tick = current_tick + duration_ticks
-        if off_tick not in note_off_events:
-            note_off_events[off_tick] = []
-        note_off_events[off_tick].append((pitch, velocity))
-    
-    # Generate note-off events in tick order
-    sorted_ticks = sorted(note_off_events.keys())
-    for tick in sorted_ticks:
-        tick_delay = tick - current_tick
-        if tick_delay < 1:
-            tick_delay = 1
-        for pitch, _ in note_off_events[tick]:
-            track.append(Message('note_off', note=pitch, velocity=0, time=tick_delay))
-            tick_delay = 0  # Subsequent note_offs in same tick group get time=0
-        current_tick = tick
+        # Note on — time=0 (starts immediately after previous event)
+        track.append(Message('note_on', note=pitch, velocity=velocity, time=0))
+        # Note off — delta advances clock by the note's duration
+        track.append(Message('note_off', note=pitch, velocity=0, time=duration_ticks))
 
     # End of track marker
     track.append(MetaMessage('end_of_track', time=0))

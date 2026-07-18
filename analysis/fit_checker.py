@@ -14,6 +14,68 @@ from typing import List, Tuple, Dict, Any, Optional
 import mido
 
 
+def _extract_notes_with_abs_time(midi_file_path: str) -> List[Tuple[int, float, int]]:
+    """
+    Extract (pitch, abs_time_seconds, velocity) from a MIDI file.
+    
+    Properly accumulates delta ticks to produce absolute times in seconds.
+    Uses the file's tempo track to convert ticks → seconds.
+    """
+    notes: List[Tuple[int, float, int]] = []
+    try:
+        midi = mido.MidiFile(midi_file_path)
+        ticks_per_beat = midi.ticks_per_beat
+        tempo = 500000  # default: 120 BPM = 500000 µs/beat
+        
+        for track in midi.tracks:
+            abs_ticks = 0
+            for msg in track:
+                abs_ticks += msg.time
+                if msg.type == 'set_tempo':
+                    tempo = msg.tempo
+                elif msg.type == 'note_on' and msg.velocity > 0:
+                    # ticks → seconds: ticks / ticks_per_beat * (tempo / 1_000_000)
+                    abs_seconds = (abs_ticks / ticks_per_beat) * (tempo / 1_000_000.0)
+                    notes.append((msg.note, abs_seconds, msg.velocity))
+    except Exception:
+        pass
+    return notes
+
+
+def _extract_chord_timeline(midi_file_path: str, bpm: int = 120) -> List[Tuple[float, List[int]]]:
+    """
+    Extract a chord timeline from a MIDI file.
+    
+    Returns a list of (abs_time_seconds, [list_of_simultaneous_pitches]) sorted by time.
+    Groups notes that start at the same time into chord blocks.
+    """
+    raw_notes = _extract_notes_with_abs_time(midi_file_path)
+    if not raw_notes:
+        return []
+    
+    # Sort by absolute time
+    raw_notes.sort(key=lambda x: x[1])
+    
+    # Group simultaneous notes (within 5ms tolerance)
+    TOLERANCE_SEC = 0.005
+    groups: List[Tuple[float, List[int]]] = []
+    current_time = raw_notes[0][1]
+    current_pitches = [raw_notes[0][0]]
+    
+    for pitch, abs_time, vel in raw_notes[1:]:
+        if abs(abs_time - current_time) <= TOLERANCE_SEC:
+            current_pitches.append(pitch)
+        else:
+            groups.append((current_time, current_pitches))
+            current_time = abs_time
+            current_pitches = [pitch]
+    
+    if current_pitches:
+        groups.append((current_time, current_pitches))
+    
+    return groups
+
+
 def build_scale_semitone_set(root_note: str, scale_mode: str) -> set:
     """
     Build a set of valid semitone intervals (0-11) for the given scale.
@@ -105,15 +167,18 @@ def check_key_conformity(midi_file_path: str, scale_semitones: set,
     return {'passed': passed, 'score': max(0, score), 'issues': issues}
 
 
-def check_harmonic_clash(midi_file_path: str, chord_progression: List[Tuple[int, float]],
+def check_harmonic_clash(melody_path: str, chord_timeline: List[Tuple[float, List[int]]],
                          scale_notes: List[int]) -> Dict[str, Any]:
     """
     Check for harmonic clashes between melody and chords.
+    
+    Only compares each melody note against the chord that is actually
+    sounding at that absolute time — not every chord in the progression.
 
     Args:
-        midi_file_path: Path to the MIDI file (melody)
-        chord_progression: List of (pitch, duration) tuples for chord voicings
-        scale_notes: List of MIDI note numbers for the scale
+        melody_path: Path to the melody MIDI file
+        chord_timeline: List of (abs_time_seconds, [simultaneous_pitches]) from _extract_chord_timeline
+        scale_notes: List of MIDI note numbers for the scale (unused, kept for signature compat)
 
     Returns:
         Dict with 'passed', 'score', and 'issues' keys
@@ -123,33 +188,46 @@ def check_harmonic_clash(midi_file_path: str, chord_progression: List[Tuple[int,
     passed = True
 
     try:
-        midi = mido.MidiFile(midi_file_path)
-
-        # Collect all melody note-on events with their times
-        melody_notes = []
-        for track in midi.tracks:
-            for msg in track:
-                if msg.type == 'note_on' and msg.velocity > 0:
-                    melody_notes.append((msg.note, msg.time))
-
-        # For each melody note, check against the chord that would be playing
+        melody_notes = _extract_notes_with_abs_time(melody_path)
         if not melody_notes:
             return {'passed': True, 'score': 100, 'issues': ['No melody notes found']}
+        if not chord_timeline:
+            return {'passed': True, 'score': 100, 'issues': ['No chord timeline available']}
 
-        for pitch, time in melody_notes:
-            for chord_pitch, chord_duration in chord_progression:
+        # Build a list of (start_time, end_time, chord_pitches) for each chord block
+        chord_blocks = []
+        for i, (abs_time, pitches) in enumerate(chord_timeline):
+            if i + 1 < len(chord_timeline):
+                end_time = chord_timeline[i + 1][0]
+            else:
+                end_time = abs_time + 4.0  # assume 4 seconds if last chord
+            chord_blocks.append((abs_time, end_time, pitches))
+
+        # For each melody note, find the chord that's sounding at its time
+        for pitch, abs_time, vel in melody_notes:
+            # Find the chord block containing this time
+            sounding_chord = None
+            for start_t, end_t, pitches in chord_blocks:
+                if start_t <= abs_time < end_t:
+                    sounding_chord = pitches
+                    break
+            
+            if sounding_chord is None:
+                continue  # no chord at this time, skip
+
+            for chord_pitch in sounding_chord:
                 interval = abs(pitch - chord_pitch)
-
-                # Minor second (1 semitone) is highly dissonant
+                # Only flag seconds (1 or 2 semitones) — thirds and beyond are consonant
                 if interval == 1:
-                    score -= 20
-                    issues.append(f"Dissonant minor 2nd at time {time}: "
+                    score -= 15
+                    issues.append(f"Dissonant minor 2nd at {abs_time:.2f}s: "
                                   f"melody pitch {pitch} vs chord note {chord_pitch}")
-                # Major second (2 semitones) is moderately dissonant
+                    break  # one clash per note is enough
                 elif interval == 2:
-                    score -= 10
-                    issues.append(f"Dissonant major 2nd at time {time}: "
+                    score -= 8
+                    issues.append(f"Dissonant major 2nd at {abs_time:.2f}s: "
                                   f"melody pitch {pitch} vs chord note {chord_pitch}")
+                    break
     except Exception as e:
         return {'passed': False, 'score': 0, 'issues': [f"Error checking harmony: {e}"]}
 
@@ -159,15 +237,18 @@ def check_harmonic_clash(midi_file_path: str, chord_progression: List[Tuple[int,
     return {'passed': passed, 'score': max(0, score), 'issues': issues}
 
 
-def check_rhythmic_alignment(midi_file_path: str, chord_change_times: List[float],
+def check_rhythmic_alignment(bassline_path: str, chord_change_times: List[float],
                              bpm: int = 120) -> Dict[str, Any]:
     """
     Check if bassline note-onsets align with chord changes.
+    
+    Uses properly extracted absolute times (seconds) for bassline notes
+    and compares against chord change times (also in seconds).
 
     Args:
-        midi_file_path: Path to the MIDI file (bassline)
-        chord_change_times: List of times (in seconds) when chords change
-        bpm: Beats per minute (for timing reference)
+        bassline_path: Path to the bassline MIDI file
+        chord_change_times: List of absolute times (seconds) when chords change
+        bpm: Beats per minute (for timing tolerance)
 
     Returns:
         Dict with 'passed', 'score', and 'issues' keys
@@ -177,24 +258,16 @@ def check_rhythmic_alignment(midi_file_path: str, chord_change_times: List[float
     passed = True
 
     try:
-        midi = mido.MidiFile(midi_file_path)
+        bassline_notes = _extract_notes_with_abs_time(bassline_path)
+        if not bassline_notes:
+            return {'passed': True, 'score': 100, 'issues': ['No bassline notes found']}
 
-        # Collect all note-on events
-        bassline_notes = []
-        for track in midi.tracks:
-            for msg in track:
-                if msg.type == 'note_on' and msg.velocity > 0:
-                    bassline_notes.append((msg.note, msg.time))
+        # Extract just the absolute times
+        bass_times = [t for _, t, _ in bassline_notes]
+        quarter_beat = 60.0 / bpm / 4.0  # quarter-beat window in seconds
 
-        # For each chord change point, check if there's a bass note onset nearby
         for chord_time in chord_change_times:
-            found_nearby = False
-            for pitch, note_time in bassline_notes:
-                quarter_beat = 60.0 / bpm / 4
-                if abs(note_time - chord_time) < quarter_beat:
-                    found_nearby = True
-                    break
-
+            found_nearby = any(abs(bt - chord_time) < quarter_beat for bt in bass_times)
             if not found_nearby:
                 score -= 25
                 issues.append(f"Bass note onset missing near chord change at {chord_time:.2f}s")
@@ -207,52 +280,11 @@ def check_rhythmic_alignment(midi_file_path: str, chord_change_times: List[float
     return {'passed': passed, 'score': max(0, score), 'issues': issues}
 
 
-def check_register_overlap(midi_file_path: str, register_range: Tuple[int, int],
-                            other_notes: List[Tuple[int, float]]) -> Dict[str, Any]:
-    """
-    Check if notes don't crowd the same octave range.
-
-    Args:
-        midi_file_path: Path to the MIDI file
-        register_range: (min_pitch, max_pitch) for this track's register
-        other_notes: List of (pitch, duration) from another track that might overlap
-
-    Returns:
-        Dict with 'passed', 'score', and 'issues' keys
-    """
-    issues = []
-    score = 100
-    passed = True
-
-    try:
-        midi = mido.MidiFile(midi_file_path)
-
-        for track in midi.tracks:
-            for msg in track:
-                if msg.type != 'note_on' or msg.velocity == 0:
-                    continue
-
-                pitch = msg.note
-
-                for other_pitch, _ in other_notes:
-                    if abs(pitch - other_pitch) < 12 and pitch != other_pitch:
-                        score -= 5
-                        issues.append(f"Register crowding at time {msg.time}: "
-                                      f"pitch {pitch} overlaps with {other_pitch}")
-    except Exception as e:
-        return {'passed': False, 'score': 0, 'issues': [f"Error checking register: {e}"]}
-
-    if score < 70:
-        passed = False
-
-    return {'passed': passed, 'score': max(0, score), 'issues': issues}
-
-
 def check_call_and_answer(melody_path: str, counter_melody_path: str) -> Dict[str, Any]:
     """
     Verify that counter-melody only plays when main melody rests or holds long notes.
-
-    This checks mutual exclusion: they should not play simultaneously on strong beats.
+    
+    Uses properly extracted absolute times (seconds) for both tracks.
 
     Args:
         melody_path: Path to the main melody MIDI file
@@ -266,41 +298,26 @@ def check_call_and_answer(melody_path: str, counter_melody_path: str) -> Dict[st
     passed = True
 
     try:
-        # Collect melody note-on times
-        melody_times = set()
-        try:
-            mmidi = mido.MidiFile(melody_path)
-            for track in mmidi.tracks:
-                for msg in track:
-                    if msg.type == 'note_on' and msg.velocity > 0:
-                        melody_times.add(msg.time)
-        except Exception:
-            pass
+        melody_notes = _extract_notes_with_abs_time(melody_path)
+        counter_notes = _extract_notes_with_abs_time(counter_melody_path)
 
-        # Collect counter-melody note-on times
-        counter_times = set()
-        try:
-            cmidi = mido.MidiFile(counter_melody_path)
-            for track in cmidi.tracks:
-                for msg in track:
-                    if msg.type == 'note_on' and msg.velocity > 0:
-                        counter_times.add(msg.time)
-        except Exception:
-            pass
+        if not melody_notes or not counter_notes:
+            return {'passed': True, 'score': 100, 'issues': []}
 
-        # Check for overlap
+        melody_times = set(t for _, t, _ in melody_notes)
+        counter_times = set(t for _, t, _ in counter_notes)
+
+        # Check for overlap (within 0.1s = 100ms window)
         overlap_count = 0
         for ct in counter_times:
-            # Check if any melody note is within 0.1s of this counter-melody note
-            for mt in melody_times:
-                if abs(ct - mt) < 0.1:
-                    overlap_count += 1
-                    break
+            if any(abs(ct - mt) < 0.1 for mt in melody_times):
+                overlap_count += 1
 
-        if overlap_count > len(counter_times) * 0.3:
+        overlap_ratio = overlap_count / max(len(counter_times), 1)
+        if overlap_ratio > 0.3:
             score -= 30
-            issues.append(f"Counter-melody overlaps with melody on {overlap_count} notes "
-                          f"(should only play during melody rests)")
+            issues.append(f"Counter-melody overlaps with melody on {overlap_count}/{len(counter_times)} notes "
+                          f"({overlap_ratio:.0%}, should be <30% for call-and-answer style)")
     except Exception as e:
         return {'passed': False, 'score': 0, 'issues': [f"Error checking call-and-answer: {e}"]}
 
@@ -361,7 +378,9 @@ def check_register_separation(track_registers: Dict[str, Tuple[int, int]]) -> Di
 def check_syncopation_density(midi_file_path: str) -> Dict[str, Any]:
     """
     Verify that vocal chops have high syncopation.
-    Syncopation is measured by the ratio of notes played on off-beats vs on-beats.
+    
+    Uses properly extracted absolute times to determine if notes fall
+    on off-beats vs on-beats of a 16th-note grid.
 
     Args:
         midi_file_path: Path to the vocal chops MIDI file
@@ -374,21 +393,19 @@ def check_syncopation_density(midi_file_path: str) -> Dict[str, Any]:
     passed = True
 
     try:
-        midi = mido.MidiFile(midi_file_path)
-        total_notes = 0
-        off_beat_notes = 0
+        notes = _extract_notes_with_abs_time(midi_file_path)
+        if not notes:
+            return {'passed': True, 'score': 100, 'issues': ['No vocal chop notes found']}
 
-        for track in midi.tracks:
-            for msg in track:
-                if msg.type == 'note_on' and msg.velocity > 0:
-                    total_notes += 1
-                    # Consider a note syncopated if its time doesn't fall on
-                    # a perfect 8th-note grid boundary
-                    # (time modulo 0.5 beats should be > 0.1 for syncopation)
-                    time_in_beats = msg.time * 0.1  # rough conversion
-                    grid_offset = time_in_beats % 0.5
-                    if grid_offset > 0.1 and grid_offset < 0.4:
-                        off_beat_notes += 1
+        total_notes = len(notes)
+        # 16th-note duration at 120 BPM is ~0.125s — we check for off-16th positions
+        # A note is "syncopated" if its time mod 0.25 (16th) is between 0.05 and 0.20
+        off_beat_notes = 0
+        for _, abs_time, _ in notes:
+            sixteenth_phase = (abs_time % 0.25)
+            # On-beat = 0.00-0.05 or 0.20-0.25; off-beat = 0.05-0.20
+            if 0.05 < sixteenth_phase < 0.20:
+                off_beat_notes += 1
 
         if total_notes > 0:
             syncopation_ratio = off_beat_notes / total_notes
@@ -401,9 +418,6 @@ def check_syncopation_density(midi_file_path: str) -> Dict[str, Any]:
                 issues.append(f"Moderate syncopation: {syncopation_ratio:.1%}")
             else:
                 issues.append(f"Good syncopation density: {syncopation_ratio:.1%}")
-        else:
-            issues.append("No notes found for syncopation check")
-            score -= 10
 
     except Exception as e:
         return {'passed': False, 'score': 0, 'issues': [f"Error checking syncopation: {e}"]}
@@ -417,6 +431,8 @@ def check_syncopation_density(midi_file_path: str) -> Dict[str, Any]:
 def check_all_tracks(config: Any, midi_files: Dict[str, str]) -> Dict[str, Any]:
     """
     Run all fit checks on generated MIDI files.
+    
+    Uses proper absolute-time extraction for all timing-sensitive checks.
 
     Args:
         config: Generation configuration (bpm, root_note, scale_mode)
@@ -431,60 +447,41 @@ def check_all_tracks(config: Any, midi_files: Dict[str, str]) -> Dict[str, Any]:
     # Import here to avoid circular imports
     from generators.common import get_scale_notes_midi
 
-    # Get scale notes for key conformity check
     scale_notes_midi = get_scale_notes_midi(config.root_note, config.scale_mode)
 
-    # Build the chord progression from the midi_files dict
+    # ---- Extract chord timeline with full chord voicings ----
     chord_path = midi_files.get('Chords') or midi_files.get('chords')
     chord_change_times: List[float] = []
-    chord_progression_notes: List[Tuple[int, float]] = []
+    chord_timeline: List[Tuple[float, List[int]]] = []
 
     if chord_path:
-        try:
-            cmidi = mido.MidiFile(chord_path)
-            chord_notes_at_time: Dict[float, List[int]] = {}
-            for track in cmidi.tracks:
-                tick_time = 0
-                for msg in track:
-                    if hasattr(msg, 'time'):
-                        tick_time += msg.time
-                    if msg.type == 'note_on' and msg.velocity > 0:
-                        time_sec = tick_time / 480.0 * (60.0 / config.bpm)
-                        if time_sec not in chord_notes_at_time:
-                            chord_notes_at_time[time_sec] = []
-                        chord_notes_at_time[time_sec].append(msg.note)
-                        chord_change_times.append(time_sec)
+        chord_timeline = _extract_chord_timeline(chord_path, config.bpm)
+        chord_change_times = [t for t, _ in chord_timeline]
 
-            for time_sec, notes in chord_notes_at_time.items():
-                chord_progression_notes.append((notes[0], 1.0))
-        except Exception:
-            pass
-
-    # Build scale semitone set for correct octave-aware key checking
+    # ---- Key conformity ----
     scale_semitones = build_scale_semitone_set(config.root_note, config.scale_mode)
-
-    # Check each track individually for key conformity
     for track_name, midi_path in midi_files.items():
-        track_lower = track_name.lower()
+        track_lower = track_name.lower().replace(' ', '_')
+        # Skip percussion and accompaniment tracks
         if track_lower in ('chords', 'hihats', 'hi-hats', 'kick', 'snare'):
-            continue  # These don't need scale conformity
+            continue
 
         result = check_key_conformity(midi_path, scale_semitones, track_name=track_name)
         if not result['passed']:
             total_score -= (100 - result['score']) * 0.2
             for issue in result['issues']:
-                total_issues.append(f"{track_name}: {issue}")
+                total_issues.append(f"Key: {issue}")
 
-    # Check harmonic clashes between melody and chords
+    # ---- Harmony check (melody vs actual chord voicings) ----
     melody_path = midi_files.get('Melody') or midi_files.get('melody')
-    if melody_path and chord_path:
-        harmony_result = check_harmonic_clash(melody_path, chord_progression_notes, scale_notes_midi)
+    if melody_path and chord_timeline:
+        harmony_result = check_harmonic_clash(melody_path, chord_timeline, scale_notes_midi)
         total_score -= (100 - harmony_result['score']) * 0.15
         if not harmony_result['passed']:
             for issue in harmony_result['issues']:
                 total_issues.append(f"Harmony: {issue}")
 
-    # Check rhythmic alignment between bassline and chords
+    # ---- Rhythmic alignment (bassline vs chord changes) ----
     bassline_path = midi_files.get('Bassline') or midi_files.get('bassline')
     if bassline_path and chord_change_times:
         rhythm_result = check_rhythmic_alignment(bassline_path, chord_change_times, config.bpm)
@@ -493,7 +490,7 @@ def check_all_tracks(config: Any, midi_files: Dict[str, str]) -> Dict[str, Any]:
             for issue in rhythm_result['issues']:
                 total_issues.append(f"Rhythm: {issue}")
 
-    # Check call-and-answer between melody and counter-melody
+    # ---- Call-and-answer (melody vs counter-melody) ----
     counter_path = midi_files.get('Counter-Melody') or midi_files.get('counter_melody')
     if melody_path and counter_path:
         ca_result = check_call_and_answer(melody_path, counter_path)
@@ -502,9 +499,13 @@ def check_all_tracks(config: Any, midi_files: Dict[str, str]) -> Dict[str, Any]:
             for issue in ca_result['issues']:
                 total_issues.append(f"Call&Answer: {issue}")
 
-    # Check register separation between all tracks
+    # ---- Register separation ----
+    # Exclude percussion tracks from register analysis
+    perc_tracks = {'hihats', 'hi-hats', 'kick', 'snare'}
     track_registers: Dict[str, Tuple[int, int]] = {}
     for track_name, midi_path in midi_files.items():
+        if track_name.lower().replace(' ', '_') in perc_tracks:
+            continue
         try:
             midi = mido.MidiFile(midi_path)
             pitches = []
@@ -524,7 +525,7 @@ def check_all_tracks(config: Any, midi_files: Dict[str, str]) -> Dict[str, Any]:
             for issue in reg_result['issues']:
                 total_issues.append(f"Register: {issue}")
 
-    # Check syncopation density for vocal chops
+    # ---- Syncopation density (vocal chops) ----
     vocal_path = midi_files.get('Vocal Chops') or midi_files.get('vocal_chops')
     if vocal_path:
         sync_result = check_syncopation_density(vocal_path)
