@@ -1,39 +1,66 @@
-# MIDI DAW GENERATOR
+# MIDI Track Generator v2
 
-A desktop GUI application that procedurally generates genre-agnostic MIDI files (bassline, hi-hats, chords, melody) using algorithmic music theory logic. Built with Python, PyQt6, and mido/pretty_midi. Output is formatted for clean import into LMMS.
+A desktop GUI application that procedurally generates genre-agnostic MIDI files using algorithmic music theory logic — not a trained AI model. Output is formatted for clean import into LMMS.
+
+**7 tracks now available:** Bassline, Chords, Hi-Hats, Melody, Counter-Melody, Vocal Chops, and Turnaround Fills.
 
 ## 1. Dependencies
 
-Please install Python before trying to install dependencies. Install the following Python packages for this program to work:
+Install Python 3.11+ first, then:
 
 ```bash
-pip install PyQt6 mido pretty_midi
+pip install PyQt6 mido
 ```
-
-Requires Python 3.11+.
 
 ## 2. Launch Command
 
 Run the application from the project root directory:
 
 ```bash
-python main.py
+py main.py
 ```
 
-## 3. Documentation
+## 3. Features
 
-Read the **DOCUMENTATION.md** file in this GitHub repository for detailed instructions on how to use this program, including:
+### Generators
+- **Chords** — Diatonic chord progressions with inversions, 7ths, sus chords
+- **Bassline** — Rhythmic bass patterns with ghost notes, walking bass, syncopation
+- **Hi-Hats** — Groove patterns with open hats, crash cymbals, 32nd-note rolls
+- **Melody** — 8-bar phrase structure with motif development and rests
+- **Counter-Melody** — Call-and-answer response that fills main melody gaps
+- **Vocal Chops** — Monophonic lead with chromatic runs and aggressive syncopation
+- **Turnaround Fills** — Chaotic chromatic fills at bar-end transitions
 
-- Selecting key, tempo, and bar length
-- Per-track enable/disable
-- Generation and fit checking
-- Understanding the output files
+### GUI
+- Dark mode UI with per-track enable checkboxes (all OFF by default)
+- Per-track sliders: velocity range, octave shift, complexity
+- Progress bar with real-time generation feedback
+- Fit score display with green/yellow/red color coding
+- Regenerate button for one-click re-rolls
 
-## 4. Output File Management
+### Fit Checker
+After each generation, analyzes all 7 tracks for:
+- Key/scale conformity (octave-correct)
+- Harmonic clash detection
+- Call-and-answer coordination
+- Register separation (crowding avoidance)
+- Syncopation density
+- Rhythmic alignment
 
-After generation completes inside the project directory, open the **OUTPUT_DEV/** folder and rename the `.mid` files if you want to keep them — they will be overwritten the next time you generate notes with a different generation seed.
+### LMMS Import
+- Standard MIDI Type 1 files, one instrument track each
+- Tempo and time signature meta events set correctly
+- GM-friendly note ranges
 
-## 5. License
+## 4. Documentation
+
+Read **DOCUMENTATION.md** for detailed instructions on using all features.
+
+## 5. Output File Management
+
+Generated MIDI files land in **OUTPUT_DEV/** in the project directory. Files are overwritten on each new generation — rename them if you want to keep a take.
+
+## 6. License
 
 All rights reserved. You may not sell this code without permission from the author.
 

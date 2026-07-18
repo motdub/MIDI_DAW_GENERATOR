@@ -15,30 +15,22 @@
 6. One concern per file, per the directory structure above. Reuse
    common.py instead of duplicating logic across generators.
 
-
-
-
-# AGENTS.md — MIDI Track Generator (Qt6 GUI)
+# AGENTS.md — MIDI Track Generator v2 (Monstercat-style)
 
 ## Project Overview
 Build a desktop GUI application that procedurally generates a set of separate,
-genre-agnostic MIDI files (bassline, hi-hats, chords, melody) using algorithmic
-music theory logic — not a trained AI model. Output goes into an OUTPUT_DEV/
-folder inside the project directory, formatted for clean import into LMMS.
+genre-agnostic MIDI files using algorithmic music theory logic — not a trained
+AI model. Output goes into an OUTPUT_DEV/ folder inside the project directory,
+formatted for clean import into LMMS.
 
 This is a local, offline tool. No network calls, no API keys, no cloud services.
 
 ## Tech Stack (required)
 - Language: Python 3.11+
-- GUI: PyQt6 (or PySide6 if PyQt6 licensing is a concern — pick one and be
-  consistent across the whole codebase)
-- MIDI generation: mido and/or pretty_midi (pure-Python, pip-installable,
-  no compiled ML dependencies)
-- Optional light randomness/structure: Python's built-in random module, or a
-  simple first-order Markov chain implemented by hand. Do not pull in
-  torch, tensorflow, magenta, or any model-weight-based generator. "Ultra-light
-  AI" here means, at most, a hand-rolled Markov chain or weighted-random choice
-  table — nothing requiring GPU, model downloads, or heavy install footprint.
+- GUI: PyQt6
+- MIDI generation: mido (pure-Python, pip-installable)
+- Randomness: Python's built-in random module, optional hand-rolled Markov chain
+- No torch, tensorflow, magenta, or any model-weight-based generator
 - Packaging: standard requirements.txt, runnable via `python main.py`
 
 ## Directory Structure
@@ -48,467 +40,157 @@ project_root/
 ├── AGENTS.md
 ├── APPEND_SYSTEM.md
 ├── requirements.txt
-├── OUTPUT_DEV/               # generated MIDI files land here (create if missing)
+├── PROGRESS.md
+├── OUTPUT_DEV/              # generated MIDI files land here (created automatically)
 ├── gui/
-│   ├── main_window.py        # QMainWindow, dark theme, layout
-│   ├── theme.py               # dark palette / stylesheet definitions
-│   └── widgets/                # any custom controls (knobs, sliders, seed field)
+│   ├── main_window.py       # QMainWindow, dark theme, layout
+│   ├── theme.py             # dark palette / stylesheet definitions
+│   └── widgets/
+│       └── seed_widget.py   # seed control with Randomize button
 ├── generators/
-│   ├── bassline.py
-│   ├── hihats.py
-│   ├── chords.py
-│   ├── melody.py
-│   └── common.py             # shared scale/key/tempo utilities
+│   ├── common.py            # shared scale/key/tempo utilities, GenerationConfig
+│   ├── bassline.py          # bassline generator
+│   ├── hihats.py            # hi-hat rhythm generator
+│   ├── chords.py            # chord progression generator
+│   ├── melody.py            # main melody generator
+│   ├── counter_melody.py    # call-and-answer counter-melody generator
+│   ├── vocal_chops.py       # vocal chop / synth fill generator
+│   └── turnaround_fills.py  # turnaround fill generator
 ├── analysis/
-│   └── fit_checker.py        # cross-track compatibility scoring
+│   └── fit_checker.py       # cross-track compatibility scoring
 └── tests/
-└── ...
+    └── ...
 
 ## Functional Requirements
 
 ### 1. GUI (Qt6, dark mode)
-- Main window with:
-  - Key selector (root note + scale/mode: major, natural minor, dorian, etc.)
-  - Tempo (BPM) input
-  - Bar length / pattern length control
-  - Seed field (optional, for reproducibility) + "Randomize" button
-  - Per-track enable checkboxes: Bassline, Hi-Hats, Chords, Melody
-  - "Generate" button
-  - A results/log panel showing generation status and the fit-check score/report
-  - "Open Output Folder" button
-- Dark mode is mandatory — implement via a QPalette-based dark theme or a
-  QSS stylesheet applied at app startup, not the OS theme. Background roughly
-  #1e1e1e to #2b2b2b, high-contrast text, accent color of your choice. No
-  reliance on system dark mode detection — the app should always launch dark.
-- No blocking UI during generation — run generation on a QThread, or via
-  processEvents() if generation is fast enough (these are short MIDI files,
-  so a worker thread is a nice-to-have, not a hard requirement, but don't
-  freeze the UI for more than ~200ms).
+- Main window with organized sections:
+  - **Song Settings**: Root note picker (note names, not MIDI numbers), Scale mode
+    (major, natural minor, dorian, phrygian, lydian, mixolydian, aeolian, ionian),
+    BPM spinbox (40-300), Bar length spinbox (1-64)
+  - **Track Enables**: QCheckBox for each track (all OFF by default):
+    Bassline, Chords, Hi-Hats, Melody, Counter-Melody, Vocal Chops, Turnaround Fills
+  - **Per-Track Controls**: When a track is enabled, show sliders for:
+    Velocity range (min/max), Octave shift (-2 to +2), Complexity (0-100%)
+  - **Generate & Output**: 
+    - "Generate All Enabled" button (primary action, blue accent #4a9eff)
+    - "Regenerate All" button (appears after first generation)
+    - "Open Output Folder" button
+    - Progress bar during generation
+    - Fit score display with color coding (green >= 80, yellow 60-79, red < 60)
+    - If fit score < 60, show "Regenerate" button prominently
+  - **Log Panel**: QTextEdit, read-only, monospace font, shows:
+    - Generation status per track
+    - Fit score and detailed issue list
+    - File paths of generated output
+- Dark mode mandatory — QPalette + QSS stylesheet, always dark
+- No blocking UI — keep generation pauses under 200ms
 
 ### 2. Generators (all algorithmic, no ML models)
-Each generator is its own module and writes its own standalone .mid file
-into OUTPUT_DEV/. Filenames: bassline.mid, hihats.mid, chords.mid,
-melody.mid. All four must share the same key, tempo, and bar length, pulled
-from a single shared config object so they generate for the same song.
+Each generator is its own module and writes its own standalone .mid file into
+OUTPUT_DEV/. All generators MUST share the same key, tempo, and bar length,
+pulled from a single GenerationConfig object.
 
-- Chords: generate a diatonic chord progression from the selected key
-  using standard progression templates (e.g. I-V-vi-IV and similar common
-  pools) or a simple weighted-random walk over scale-degree chords. Voice
-  the chords in a sensible register (roughly octave 3-4).
-- Bassline: derive from the chord progression's root/fifth movement, with
-  simple rhythmic variation (root on downbeat, passing/approach tones on
-  weak beats). Keep it in a low register (octave 2-3) and rhythmically
-  locked to the chord changes so it doesn't clash.
-- Hi-hats: rhythm-only generator (single pitch, e.g. GM closed hi-hat
-  note 42, optionally open hat 46) using a pattern generator — steady 8th/16th
-  notes with probabilistic accents/velocity variation and occasional
-  syncopation. This track cares about rhythm and velocity, not pitch.
-- Melody: generate over the chord progression using chord-tone-weighted
-  note selection (strong beats favor chord tones, weak beats allow scale
-  passing tones), with simple contour rules (avoid large repeated leaps,
-  occasional rests, phrase-level shape).
+#### Existing Generators (improved):
 
-### 3. Fit Checker (analysis/fit_checker.py)
-After generation, analyze the four MIDI files together and produce a
-pass/fail plus score report shown in the GUI log panel. Checks should include,
-at minimum:
-- Key/scale conformity: flag any notes in melody/bassline/chords that
-  fall outside the selected scale (allow passing tones in melody but flag
-  clusters of out-of-scale notes).
-- Harmonic clash detection: check melody notes against the active chord
-  at that time position for dissonant intervals sustained too long (e.g. a
-  minor 2nd held on a strong beat).
-- Rhythmic alignment: confirm bassline note-onsets align with chord
-  changes (bass root should land on or near each chord change).
-- Register/overlap check: confirm bassline and chords aren't crowding
-  the same octave range in a muddy way.
-- Output a simple numeric score (e.g. 0-100) plus a short human-readable
-  list of any issues found. This is a heuristic checker, not a music AI —
-  keep the rules transparent and easy to read in code.
-- If generation fails the fit check by a wide margin, offer a "Regenerate"
-  action in the GUI rather than silently failing.
+**Chords** (`generators/chords.py`):
+- Generate diatonic chord progression from selected key
+- Use common progression templates (I-V-vi-IV, ii-V-I, I-IV-V-vi)
+- Add chord inversions (root, 1st, 2nd) randomly chosen per bar
+- Add 7th chords ~30% of the time
+- Add sus2/sus4 chords ~10% of the time
+- Stagger note-on times slightly (±5-15 ticks) for human feel
+- Voice in octave 3-4 with wider spacing for modern sound
+- Output file: chords.mid
 
-### 4. LMMS Import Compatibility
-- Standard MIDI Type 1 (or Type 0) files, one instrument track each.
-- Use conventional GM-friendly note ranges (avoid extreme octaves).
-- Set tempo/time signature meta events correctly in each file so they stay
-  in sync when imported as separate LMMS tracks.
-- Test-import note: files should each be importable into LMMS as a single
-  MIDI/Piano Roll track without manual quantization fixes required.
+**Bassline** (`generators/bassline.py`):
+- Derive from chord progression's root/fifth movement
+- Add rhythmic variation: 8th and 16th note patterns, ghost notes (vel 20-40)
+- Syncopation: occasionally skip downbeat
+- Walking bass patterns between chord roots
+- Keep in low register (MIDI 24-48, octave 2-3)
+- Output file: bassline.mid
+
+**Hi-Hats** (`generators/hihats.py`):
+- Rhythm-only generator (GM notes: closed hat 42, open hat 46, crash 49)
+- Steady 8th/16th with probabilistic accents and velocity variation
+- Open hat patterns on off-beats
+- Crash cymbal on first beat of every 4th bar
+- Occasional 32nd-note rolls for buildups
+- Velocity range 20-127
+- Output file: hihats.mid
+
+**Melody** (`generators/melody.py`):
+- Chord-tone-weighted note selection (strong beats favor chord tones)
+- Phrase structure: 8-bar phrases with A part (bars 1-4) and B part (bars 5-8)
+- Add rests: 20-30% silence for breathing room
+- Motif development: repeat first 4-note idea with variation
+- Avoid ending on root note (creates tension/resolution cycle)
+- Stepwise motion preferred, limit leaps > 12 semitones
+- Register: MIDI 60-84 (octave 5-6)
+- Output file: melody.mid
+
+#### New Generators:
+
+**Counter-Melody** (`generators/counter_melody.py`):
+- Analyze main melody note pattern for rests and long notes (> half-note)
+- When melody rests or holds a long note, trigger fast 3-5 note phrases
+- Play in higher octave (+12 to +19 semitones above melody)
+- Call-and-answer structure: melody = call (beats 1-2), counter = answer (beats 3-4)
+- All notes diatonic to selected scale
+- Rhythm: 16th notes with occasional triplet feel
+- Velocity: 60-100, ghost notes at 30-40
+- Output file: counter_melody.mid
+
+**Vocal Chops** (`generators/vocal_chops.py`):
+- Monophonic lead synth pattern (one note at a time)
+- 16th-note triplets and aggressive syncopation
+- Tight with drum grid: fills gaps between kick (beat 1) and snare (beat 3)
+- Pitch range: octave 5-6 (MIDI 72-96)
+- Rapid chromatic approach notes to target tones
+- If mido supports pitch bend, add pitch bend messages for portamento effect
+- Otherwise, use 3-note chromatic approach (e.g., G#-A-A#-B to target B)
+- Output file: vocal_chops.mid
+
+**Turnaround Fills** (`generators/turnaround_fills.py`):
+- Generate chaotic fill patterns for end of every 8th bar (last 2 beats)
+- Chromatic scale runs: 4-8 notes ascending or descending
+- Also provides `get_melody_blank_positions()` — tells main melody where to rest
+- Use V-chord tones or chromatic approach to next bar's root
+- Output file: turnaround_fills.mid
+
+### 3. Cross-Track Coordination Rules
+- Counter-melody must NOT overlap with main melody (mutual exclusion on strong beats)
+- Vocal chops intertwine with melody but don't play at same time
+- Turnaround fills blank out melody for 2 beats at bar-ends
+- All tracks derived from same chord progression array
+- Bass root must land on chord change boundaries
+
+### 4. Fit Checker (analysis/fit_checker.py)
+After generation, analyze all MIDI files and produce pass/fail + score report:
+- Key/scale conformity (allow passing tones up to 20%)
+- Harmonic clash detection (melody vs chords, vocal chops vs chords)
+- Call-and-answer check: verify counter-melody only plays when melody rests
+- Register separation: ensure no two tracks crowd same octave
+- Rhythmic alignment: bass note-onsets with chord changes
+- Syncopation density: vocal chops should have high syncopation ratio
+- Output numeric score 0-100 with human-readable issues list
+- If score < 60, show "Regenerate All" button prominently
+
+### 5. LMMS Import Compatibility
+- Standard MIDI Type 1 files, one instrument track each
+- Conventional GM-friendly note ranges
+- Set tempo/time signature meta events correctly
+- Files importable as single MIDI/Piano Roll track without manual fixup
 
 ## Coding Conventions
-- Type-hint all function signatures.
+- Type-hint all function signatures
 - Keep generator modules independent and unit-testable — no GUI imports
-  inside generators/ or analysis/.
-- Shared config (key, tempo, bars, seed) passed as a plain dataclass, not
-  globals.
-- Comment the music-theory logic (scale tables, chord templates) clearly
-  since this is the "algorithm," not a black box.
+- Shared config via GenerationConfig dataclass (no globals)
+- Comment music theory logic clearly (scale tables, chord templates, progression rules)
+- File paths relative to project root, output to OUTPUT_DEV/
 
 ## Out of Scope
-- No cloud/AI-model-based generation.
-- No audio rendering/synthesis — MIDI only.
-- No DAW plugin packaging (VST/CLAP) — standalone desktop app only.
-
-dont make mistake 
-
- write ...                                                                                                                 
-                                                                                                                           
- Validation failed for tool "write":                                                                                       
-   - path: must have required properties path, content                                                                     
-                                                                                                                           
- Received arguments:                                                                                                       
- {}                                                                                                                        
-                         
-                           STOP MAKING THIS MISTAKE
-
-                          write ...                                                                                                                 
-                                                                                                                           
- Validation failed for tool "write":                                                                                       
-   - path: must have required properties path, content                                                                     
-                                                                                                                           
- Received arguments:                                                                                                       
- {}                       
-
-
-
-STOP MAKING THIS MISTAKE
-
- write ...                                                                                                                 
-                                                                                                                           
- terminated    
- STOP MAKING THIS MISTAKE
-
- write ...                                                                                                                 
-                                                                                                                           
- terminated    
-
- 
-STOP MAKING THIS MISTAKE
-
- write ...                                                                                                                 
-                                                                                                                           
- terminated    
-
- 
-STOP MAKING THIS MISTAKE
-
- write ...                                                                                                                 
-                                                                                                                           
- terminated    
-
- 
-STOP MAKING THIS MISTAKE
-
- write ...                                                                                                                 
-                                                                                                                           
- terminated    
-
- 
-STOP MAKING THIS MISTAKE
-
- write ...                                                                                                                 
-                                                                                                                           
- terminated    
- 
-STOP MAKING THIS MISTAKE
-
- write ...                                                                                                                 
-                                                                                                                           
- terminated    
- 
-STOP MAKING THIS MISTAKE
-
- write ...                                                                                                                 
-                                                                                                                           
- terminated    
- 
-STOP MAKING THIS MISTAKE
-
- write ...                                                                                                                 
-                                                                                                                           
- terminated    
- 
-STOP MAKING THIS MISTAKE
-
- write ...                                                                                                                 
-                                                                                                                           
- terminated    
- 
-STOP MAKING THIS MISTAKE
-
- write ...                                                                                                                 
-                                                                                                                           
- terminated    
- 
-STOP MAKING THIS MISTAKE
-
- write ...                                                                                                                 
-                                                                                                                           
- terminated    
-
- 
-STOP MAKING THIS MISTAKE
-
- write ...                                                                                                                 
-                                                                                                                           
- terminated    
-
-
- 
-STOP MAKING THIS MISTAKE
-
- write ...                                                                                                                 
-                                                                                                                           
- terminated    
-
- v
-
- 
-STOP MAKING THIS MISTAKE
-
- write ...                                                                                                                 
-                                                                                                                           
- terminated    
- 
-STOP MAKING THIS MISTAKE
-
- write ...                                                                                                                 
-                                                                                                                           
- terminated    
- 
-STOP MAKING THIS MISTAKE
-
- write ...                                                                                                                 
-                                                                                                                           
- terminated    
- 
-STOP MAKING THIS MISTAKE
-
- write ...                                                                                                                 
-                                                                                                                           
- terminated    
-
- 
-STOP MAKING THIS MISTAKE
-
- write ...                                                                                                                 
-                                                                                                                           
- terminated    
-                    
-                    STOP MAKING THIS MISTAKE
-
- write ...                                                                                                                 
-                                                                                                                           
- terminated    
-
- 
-STOP MAKING THIS MISTAKE
-
- write ...                                                                                                                 
-                                                                                                                           
- terminated    
-
- 
-STOP MAKING THIS MISTAKE
-
- write ...                                                                                                                 
-                                                                                                                           
- terminated    
-
- 
-STOP MAKING THIS MISTAKE
-
- write ...                                                                                                                 
-                                                                                                                           
- terminated    
-
- 
-STOP MAKING THIS MISTAKE
-
- write ...                                                                                                                 
-                                                                                                                           
- terminated    
- 
-STOP MAKING THIS MISTAKE
-
- write ...                                                                                                                 
-                                                                                                                           
- terminated    
- 
-STOP MAKING THIS MISTAKE
-
- write ...                                                                                                                 
-                                                                                                                           
- terminated    
- 
-STOP MAKING THIS MISTAKE
-
- write ...                                                                                                                 
-                                                                                                                           
- terminated    
- 
-STOP MAKING THIS MISTAKE
-
- write ...                                                                                                                 
-                                                                                                                           
- terminated    
- 
-STOP MAKING THIS MISTAKE
-
- write ...                                                                                                                 
-                                                                                                                           
- terminated    
- 
-STOP MAKING THIS MISTAKE
-
- write ...                                                                                                                 
-                                                                                                                           
- terminated    
-
- 
-STOP MAKING THIS MISTAKE
-
- write ...                                                                                                                 
-                                                                                                                           
- terminated    
-
-
- 
-STOP MAKING THIS MISTAKE
-
- write ...                                                                                                                 
-                                                                                                                           
- terminated    
-
-
-
-i told you
-
- finish the .midi generator until it is finished.                                                                          
-                                                                                                                           
-
- I need to see what files already exist in the project directory to understand the current state before building on top of 
- them.                                                                                                                     
-                                                                                                                           
- Let me check the current directory structure and existing files.                                                          
-
- Let me first check what already exists in the project, then I'll build out the complete MIDI generator system.            
-
-                                                                                                                           
- $ ls -la "C:/Piano_Roll_DAW_mycustom_ai/" 2>/dev/null || echo "Directory not found"                                       
-                                                                                                                           
- ... (48 earlier lines, ctrl+o to expand)                                                                                  
- drwxr-xr-x 1 Matt 197121     0 Jul 14 15:33 tests                                                                         
- -rw-r--r-- 1 Matt 197121   587 Jul  9 09:29 tsconfig.json                                                                 
- -rwxr-xr-x 1 Matt 197121  1158 Jul 11 19:24 USE TO LAUNCH launch-dev.bat - Shortcut.lnk                                   
- -rwxr-xr-x 1 Matt 197121  3054 Jul 14 22:40 validate_midi_gen.py                                                          
- -rw-r--r-- 1 Matt 197121   268 Jul 12 12:01 vite.config.ts                                                                
-                                                                                                                           
- Took 0.8s                                                                                                                 
-                                                                                                                           
-
- Let me check the existing files to understand what's already been built.                                                  
-
-                                                                                                                           
- $ find "C:/Piano_Roll_DAW_mycustom_ai/" -type f -name "*.py" | head -50                                                   
-                                                                                                                           
- ... (8 earlier lines, ctrl+o to expand)                                                                                   
- C:/Piano_Roll_DAW_mycustom_ai/gui/widgets/seed_widget.py                                                                  
- C:/Piano_Roll_DAW_mycustom_ai/main.py                                                                                     
- C:/Piano_Roll_DAW_mycustom_ai/main_generator.py                                                                           
- C:/Piano_Roll_DAW_mycustom_ai/tests/generate_test.py                                                                      
- C:/Piano_Roll_DAW_mycustom_ai/validate_midi_gen.py                                                                        
-                                                                                                                           
- Took 0.3s                                                                                                                 
-                                                                                                                           
-
- Let me read the existing files to understand what's already built. I'll start by reading the main files one at a time.    
-
-                                                                                                                           
- read C:/Piano_Roll_DAW_mycustom_ai/main.py                                                                                
-                                                                                                                           
-
- Let me check what's in the gui and generators directories.                                                                
-
- I'll read through all existing files to understand the current state, then complete the implementation.                   
-
-                                                                                                                           
- read C:/Piano_Roll_DAW_mycustom_ai/gui/main_window.py                                                                     
-                                                                                                                           
- ENOENT: no such file or directory, access 'C:\Piano_Roll_DAW_mycustom_ai\gui\main_window.py'                              
-                                                                                                                           
-
- The main_window.py doesn't exist yet. Let me check what does exist in the gui and generators directories.                 
-
-                                                                                                                           
- $ ls -la "C:/Piano_Roll_DAW_mycustom_ai/gui/" && ls -la "C:/Piano_Roll_DAW_mycustom_ai/generators/" && ls -la             
- "C:/Piano_Roll_DAW_mycustom_ai/analysis/"                                                                                 
-                                                                                                                           
- ... (12 earlier lines, ctrl+o to expand)                                                                                  
- -rw-r--r-- 1 Matt 197121 11340 Jul 14 15:22 melody.py                                                                     
- total 24                                                                                                                  
- drwxr-xr-x 1 Matt 197121    0 Jul 14 15:31 .                                                                              
- drwxr-xr-x 1 Matt 197121    0 Jul 14 22:44 ..                                                                             
- -rw-r--r-- 1 Matt 197121 9134 Jul 14 15:31 fit_checker.py                                                                 
-                                                                                                                           
- Took 0.2s                                                                                                                 
-                                                                                                                           
-
- Let me read the existing files to understand what's already built. I'll start with the generators and analysis since      
- those seem most complete.                                                                                                 
-
-                                                                                                                           
- read C:/Piano_Roll_DAW_mycustom_ai/generators/common.py                                                                   
-                                                                                                                           
-
- Let me read the existing files to understand what's already built. I'll start by reading all the generator and analysis   
- files.                                                                                                                    
-
-                                                                                                                           
- read C:/Piano_Roll_DAW_mycustom_ai/generators/bassline.py                                                                 
-                                                                                                                           
-
- Let me continue reading the existing files to understand what's already built.                                            
-
-                                                                                                                           
- read C:/Piano_Roll_DAW_mycustom_ai/generators/chords.py                                                                   
-                                                                                                                           
-
- Let me continue reading the existing files to understand what's already built. I need to read all the generator and       
- analysis files.                                                                                                           
-
-                                                                                                                           
- read C:/Piano_Roll_DAW_mycustom_ai/generators/hihats.py                                                                   
-                                                                                                                           
-
- Let me continue reading the remaining files to understand what's already built. I need to read melody.py and              
- fit_checker.py next.                                                                                                      
-
-                                                                                                                           
- read C:/Piano_Roll_DAW_mycustom_ai/generators/melody.py                                                                   
-                                                                                                                           
-
- Let me continue reading the remaining files to understand what's already built. I need to read fit_checker.py and         
- theme.py next.                                                                                                            
-
-                                                                                                                           
- read C:/Piano_Roll_DAW_mycustom_ai/analysis/fit_checker.py                                                                
-                                                                                                                           
-
- Let me continue reading the remaining files to understand what's already built. I need to read theme.py and widgets next. 
-
-                                                                                                                           
- read C:/Piano_Roll_DAW_mycustom_ai/gui/theme.py                                                                           
-                                                                                                                           
-
- Let me continue reading the remaining files to understand what's already built. I need to read widgets and main_window.py 
- next.                                                                                                                     
-
-                                                                                                                           
- read C:/Piano_Roll_DAW_mycustom_ai/gui/widgets/seed_widget.py                                                             
-                                                                                                                           
-
- Let me check if there's a main_window.py file and read any other key files.                                               
- 
- and then you froze instead of acctually coding. don't do that.
+- No cloud/AI-model-based generation
+- No audio rendering/synthesis — MIDI only
+- No DAW plugin packaging (VST/CLAP)
